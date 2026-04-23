@@ -1,37 +1,239 @@
-from flask import Flask, request, jsonify
+# بوت تليجرام بتقنية Gemini 2.5 Pro (نانو بانانا 2)
+# المطور: بكري بيس
+
+import os
+import json
 import requests
-import hashlib
-from datetime import datetime
+from datetime import date, datetime
+import google.generativeai as genai
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-app = Flask(__name__)
+# ===================== إعدادات البوت =====================
 BOT_TOKEN = "8733069593:AAFNeMjYGntp5OdL8Qp6rWXZyHC4Xd7Fm4Q"
+GEMINI_API_KEY = "AIzaSyBcqrpdbxunUAnbEtsGBUoGUt2W95hZUtU"
 DEVELOPER_NAME = "بكري بيس"
-WATERMARK = "[BAKRI BIS AI]"
 
-def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": chat_id, "text": text})
-    except Exception as e:
-        print("Error:", e)
+# تهيئة جوجل جيميناي
+genai.configure(api_key=GEMINI_API_KEY)
 
-@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    try:
-        data = request.get_json()
-        if data and "message" in data:
-            chat_id = data["message"]["chat"]["id"]
-            text = data["message"].get("text", "")
-            if text:
-                response = f"✨ {WATERMARK} ✨\n👨‍💻 المطور: {DEVELOPER_NAME}\n\n📨 رسالتك: {text}"
-                send_message(chat_id, response)
-        return jsonify({"status": "ok"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+# استخدام نموذج نانو بانانا 2 (يدعم توليد صور واقعية)
+image_model = genai.ImageGenerationModel("gemini-2.5-flash-image")
 
-@app.route("/")
-def index():
-    return f"{WATERMARK} - البوت يعمل 24/7"
+# ===================== الأزرار =====================
+def get_main_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🎨 توليد صورة", callback_data="generate")],
+        [InlineKeyboardButton("🎭 الأنماط", callback_data="styles")],
+        [InlineKeyboardButton("❓ المساعدة", callback_data="help")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_back_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="back")]])
+
+def get_styles_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📸 واقعي", callback_data="style_realistic")],
+        [InlineKeyboardButton("🎨 فني", callback_data="style_artistic")],
+        [InlineKeyboardButton("✨ خيالي", callback_data="style_fantasy")],
+        [InlineKeyboardButton("🔮 مستقبلي", callback_data="style_futuristic")],
+        [InlineKeyboardButton("🖼️ سينمائي", callback_data="style_cinematic")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# ===================== نظام المستخدمين =====================
+USERS_FILE = "users.json"
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_users(users):
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users, f, indent=2)
+
+def get_user(chat_id):
+    users = load_users()
+    chat_id_str = str(chat_id)
+    if chat_id_str not in users:
+        users[chat_id_str] = {
+            "daily_used": 0,
+            "last_reset": str(date.today()),
+            "total_generated": 0
+        }
+        save_users(users)
+    return users[chat_id_str]
+
+def update_user(chat_id, data):
+    users = load_users()
+    chat_id_str = str(chat_id)
+    if chat_id_str in users:
+        users[chat_id_str].update(data)
+        save_users(users)
+
+def get_remaining(chat_id):
+    user = get_user(chat_id)
+    if user["last_reset"] != str(date.today()):
+        user["daily_used"] = 0
+        user["last_reset"] = str(date.today())
+        update_user(chat_id, {"daily_used": 0, "last_reset": str(date.today())})
+    return max(0, 15 - user["daily_used"])
+
+def increment_counter(chat_id):
+    user = get_user(chat_id)
+    update_user(chat_id, {
+        "daily_used": user["daily_used"] + 1,
+        "total_generated": user["total_generated"] + 1
+    })
+
+# ===================== خريطة الأنماط =====================
+STYLE_MAP = {
+    "realistic": "photorealistic, ultra HD, 8K, real life, professional photography, canon camera, natural lighting, sharp focus, highly detailed",
+    "artistic": "beautiful painting, masterpiece, digital art, vibrant colors, artistic, creative, stunning composition",
+    "fantasy": "fantasy art, magical, ethereal, dreamlike, mystical atmosphere, enchanted forest, glowing lights",
+    "futuristic": "cyberpunk, futuristic, sci-fi, neon lights, high tech, modern, sleek design, advanced technology",
+    "cinematic": "cinematic, movie scene, dramatic lighting, wide shot, film grain, cinema quality, epic"
+}
+
+# ===================== دوال البوت =====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    remaining = get_remaining(chat_id)
+    text = f"""
+🌟 *مرحباً بك في بوت {DEVELOPER_NAME}* 🌟
+
+✨ *أنا بوت احترافي لتوليد الصور بالذكاء الاصطناعي*
+
+📊 *صورك المتبقية اليوم:* {remaining}
+
+🎯 *كيف تستخدم البوت؟*
+1. اضغط على زر "🎨 توليد صورة"
+2. اختر النمط المناسب
+3. اكتب وصف الصورة بالتفصيل
+
+📝 *مثال لوصف جيد:*
+"رجل يحمل القمر في السماء، منظر ليلي ساحر، إضاءة فضية"
+
+💡 *نصيحة:* كلما كان الوصف أكثر تفصيلاً، كانت النتيجة أفضل!
+
+👨‍💻 {DEVELOPER_NAME}
+"""
+    await update.message.reply_text(text, reply_markup=get_main_keyboard())
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data == "back":
+        await query.edit_message_text("🌟 القائمة الرئيسية", reply_markup=get_main_keyboard())
+    
+    elif data == "help":
+        text = """
+❓ *المساعدة*
+
+🎨 *لتوليد صورة:*
+1. اضغط "توليد صورة"
+2. اختر النمط (واقعي، فني، خيالي...)
+3. اكتب وصفاً مفصلاً
+
+📝 *أمثلة لوصف جيد:*
+• "رجل يحمل القمر بيديه، ملابس سوداء، خلفية نجوم"
+• "امرأة جميلة في حديقة ورد، إضاءة دافئة"
+• "جسر خشبي فوق نهر في غابة خريفية"
+
+✨ {DEVELOPER_NAME}
+"""
+        await query.edit_message_text(text, reply_markup=get_back_keyboard())
+    
+    elif data == "styles":
+        await query.edit_message_text("🎭 *اختر نمط الصورة:*", reply_markup=get_styles_keyboard())
+    
+    elif data.startswith("style_"):
+        style = data[6:]
+        context.user_data['selected_style'] = style
+        style_names = {"realistic": "واقعي", "artistic": "فني", "fantasy": "خيالي", "futuristic": "مستقبلي", "cinematic": "سينمائي"}
+        await query.edit_message_text(f"✅ *تم اختيار النمط: {style_names.get(style, style)}*\n\n🎨 *أرسل وصف الصورة الآن*", reply_markup=get_back_keyboard())
+        context.user_data['mode'] = 'generate'
+    
+    elif data == "generate":
+        await query.edit_message_text("🎭 *اختر نمط الصورة أولاً:*", reply_markup=get_styles_keyboard())
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    mode = context.user_data.get('mode')
+    
+    if mode == 'generate':
+        prompt = update.message.text.strip()
+        
+        if len(prompt) < 5:
+            await update.message.reply_text("✏️ *الوصف قصير جداً*\nالرجاء كتابة وصف أكثر تفصيلاً (أكثر من 5 أحرف)", reply_markup=get_back_keyboard())
+            return
+        
+        remaining = get_remaining(chat_id)
+        if remaining <= 0:
+            await update.message.reply_text("⚠️ *تم استنفاذ حدك اليومي!*\nيمكنك المحاولة غداً", reply_markup=get_main_keyboard())
+            context.user_data['mode'] = None
+            return
+        
+        style = context.user_data.get('selected_style', 'realistic')
+        style_prompt = STYLE_MAP.get(style, STYLE_MAP["realistic"])
+        style_names = {"realistic": "واقعي", "artistic": "فني", "fantasy": "خيالي", "futuristic": "مستقبلي", "cinematic": "سينمائي"}
+        
+        full_prompt = f"{prompt}, {style_prompt}, high quality, detailed, beautiful, professional, 8K"
+        
+        await update.message.reply_text(f"🎨 *جارٍ توليد صورتك...*\n🎭 النمط: {style_names.get(style, style)}\n📝 {prompt}\n⏳ انتظر لحظات...")
+        
+        try:
+            response = image_model.generate_images(
+                prompt=full_prompt,
+                number_of_images=1,
+                aspect_ratio="1:1"
+            )
+            
+            image = response.images[0]
+            increment_counter(chat_id)
+            new_remaining = get_remaining(chat_id)
+            
+            await update.message.reply_photo(
+                photo=image._image_bytes,
+                caption=f"✨ *{DEVELOPER_NAME}*\n🎭 {style_names.get(style, style)}\n📝 {prompt}\n📊 متبقي اليوم: {new_remaining}\n🔐 حقوق النشر محفوظة"
+            )
+            
+            context.user_data['mode'] = None
+            context.user_data['selected_style'] = None
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "safety" in error_msg.lower():
+                await update.message.reply_text("⚠️ *عذراً، لا يمكن توليد هذا المحتوى*\nيرجى تغيير الوصف", reply_markup=get_back_keyboard())
+            else:
+                await update.message.reply_text(f"❌ *حدث خطأ:* {error_msg[:100]}", reply_markup=get_back_keyboard())
+    
+    else:
+        remaining = get_remaining(chat_id)
+        await update.message.reply_text(
+            f"🌟 *استخدم الأزرار للتفاعل*\n\n📊 صورك المتبقية: {remaining}\n🎨 اضغط على 'توليد صورة' ثم اختر النمط",
+            reply_markup=get_main_keyboard()
+        )
+
+# ===================== التشغيل =====================
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    print("=" * 50)
+    print(f"✨ بوت {DEVELOPER_NAME} (نانو بانانا 2) يعمل...")
+    print("🎨 توليد صور واقعية | يفهم اللغة العربية")
+    print("=" * 50)
+    app.run_polling()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    main()
